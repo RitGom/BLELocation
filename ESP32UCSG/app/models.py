@@ -16,3 +16,10 @@ class PuntoInteres(Base):
     nombre = Column(String(100), nullable=False)
     coordenada_x = Column(DECIMAL(10, 2), nullable=False)
     coordenada_y = Column(DECIMAL(10, 2), nullable=False)
+
+class Beacon(Base):
+    __tablename__ = "beacons"
+    
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    beacon_name = Column(String(50), nullable=False, index=True)
+    user_name = Column(String(50), nullable=False)

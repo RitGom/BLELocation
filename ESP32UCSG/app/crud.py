@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from app.models import ESP32_UCSG, PuntoInteres
+from app.models import ESP32_UCSG, PuntoInteres, Beacon
 from typing import List, Optional
 
 # Funciones existentes para ESP32
@@ -42,3 +42,28 @@ def validate_punto_interes_exists(db: Session, punto_id: int) -> bool:
     """Validar si un punto de interés existe"""
     punto = get_punto_interes_by_id(db, punto_id)
     return punto is not None
+
+# Nuevas funciones para Beacons
+def get_all_beacons(db: Session) -> List[Beacon]:
+    """Obtener todos los beacons registrados"""
+    return db.query(Beacon).all()
+
+def get_beacon_by_name(db: Session, beacon_name: str) -> Optional[Beacon]:
+    """Obtener un beacon por su nombre"""
+    return db.query(Beacon).filter(Beacon.beacon_name == beacon_name).first()
+
+def validate_beacon_exists(db: Session, beacon_name: str) -> bool:
+    """Validar si un beacon existe en la base de datos"""
+    beacon = get_beacon_by_name(db, beacon_name)
+    return beacon is not None
+
+def get_user_by_beacon_name(db: Session, beacon_name: str) -> Optional[str]:
+    """Obtener el nombre del usuario asignado a un beacon"""
+    beacon = get_beacon_by_name(db, beacon_name)
+    if beacon:
+        return beacon.user_name
+    return None
+
+def get_beacon_by_user_name(db: Session, user_name: str) -> Optional[Beacon]:
+    """Obtener beacon asignado a un usuario específico"""
+    return db.query(Beacon).filter(Beacon.user_name == user_name).first()

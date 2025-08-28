@@ -2,10 +2,12 @@ from pydantic import BaseModel
 from typing import Optional, List
 from decimal import Decimal
 
+
 # Esquema para recibir datos del ESP32
 class ESP32DataRequest(BaseModel):
     esp32_id: str
     rssi: int
+    beacon_name: str
 
 # Esquema para respuesta de ESP32
 class ESP32Response(BaseModel):
@@ -92,3 +94,23 @@ class RouteFromPositionRequest(BaseModel):
     user_y: float
     destination_id: Optional[int] = None
     max_suggestions: Optional[int] = 3
+
+class BeaconResponse(BaseModel):
+    id: int
+    beacon_name: str
+    user_name: str
+    
+    class Config:
+        from_attributes = True
+
+class BeaconValidationResponse(BaseModel):
+    beacon_exists: bool
+    user_name: str
+    message: str
+
+class UserBeaconDataResponse(BaseModel):
+    user_name: str
+    beacon_name: str
+    esp32_data: dict
+    total_measurements: int
+    can_calculate_position: bool
