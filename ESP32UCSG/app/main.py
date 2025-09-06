@@ -1,3 +1,5 @@
+# app/main.py
+
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -43,7 +45,8 @@ from app.utils import (
     validate_trilateration_data,
     calculate_distances_to_points,
     create_route_suggestions,
-    validate_coordinates
+    validate_coordinates,
+    calculate_position_with_fallback
 )
 
 # Cargar variables de entorno
@@ -167,7 +170,7 @@ async def receive_esp32_data(data: ESP32DataRequest, db: Session = Depends(get_d
 
 @app.get("/esp32/stored-data")
 async def get_stored_data(db: Session = Depends(get_db)):
-    """Obtener todos los datos almacenados organizados por usuario con información de beacons"""
+    """Obtener todos los datos almacenados organizados por usuario con información de capacidades de posicionamiento"""
     
     if not user_esp32_data_store:
         return {
@@ -184,11 +187,32 @@ async def get_stored_data(db: Session = Depends(get_db)):
         beacon = get_beacon_by_user_name(db, user_name)
         beacon_name = beacon.beacon_name if beacon else "No asignado"
         
+        # Determinar capacidad de posicionamiento
+        devices_count = len(esp32_data)
+        if devices_count >= 3:
+            can_calculate = True
+            positioning_capability = "Trilateración completa (precisión alta)"
+            precision_level = "alta"
+        elif devices_count == 2:
+            can_calculate = True
+            positioning_capability = "Bilateración (precisión media)"
+            precision_level = "media"
+        elif devices_count == 1:
+            can_calculate = True
+            positioning_capability = "Aproximación simple (precisión baja)"
+            precision_level = "baja"
+        else:
+            can_calculate = False
+            positioning_capability = "Sin capacidad de posicionamiento"
+            precision_level = "no_disponible"
+        
         # Organizar datos del usuario
         users_data[user_name] = {
             "beacon_name": beacon_name,
-            "total_measurements": len(esp32_data),
-            "can_calculate_position": len(esp32_data) >= 3,
+            "total_measurements": devices_count,
+            "can_calculate_position": can_calculate,
+            "positioning_capability": positioning_capability,
+            "precision_level": precision_level,
             "esp32_devices_data": esp32_data,
             "last_measurements": {
                 esp32_id: {
@@ -200,13 +224,27 @@ async def get_stored_data(db: Session = Depends(get_db)):
             }
         }
     
+    # Contar usuarios por nivel de precisión
+    precision_counts = {
+        "alta": sum(1 for data in users_data.values() if data["precision_level"] == "alta"),
+        "media": sum(1 for data in users_data.values() if data["precision_level"] == "media"),
+        "baja": sum(1 for data in users_data.values() if data["precision_level"] == "baja"),
+        "sin_datos": sum(1 for data in users_data.values() if data["precision_level"] == "no_disponible")
+    }
+    
     return {
         "message": f"Datos almacenados para {len(users_data)} usuarios",
         "total_users": len(users_data),
         "users_data": users_data,
         "system_summary": {
-            "users_with_sufficient_data": sum(1 for data in users_data.values() if data["can_calculate_position"]),
-            "total_esp32_measurements": sum(data["total_measurements"] for data in users_data.values())
+            "users_with_positioning": sum(1 for data in users_data.values() if data["can_calculate_position"]),
+            "total_esp32_measurements": sum(data["total_measurements"] for data in users_data.values()),
+            "precision_distribution": precision_counts,
+            "positioning_methods_available": [
+                "Trilateración (3+ ESP32) - Alta precisión",
+                "Bilateración (2 ESP32) - Precisión media", 
+                "Aproximación (1 ESP32) - Precisión baja"
+            ]
         }
     }
 
@@ -300,7 +338,7 @@ async def validate_beacon(beacon_name: str, db: Session = Depends(get_db)):
 
 @app.get("/user/{user_name}/data", response_model=UserBeaconDataResponse)
 async def get_user_esp32_data(user_name: str, db: Session = Depends(get_db)):
-    """Obtener datos de ESP32 almacenados para un usuario específico"""
+    """Obtener datos de ESP32 almacenados para un usuario específico (modificado)"""
     # Verificar que el usuario tiene un beacon asignado
     beacon = get_beacon_by_user_name(db, user_name)
     if not beacon:
@@ -312,12 +350,24 @@ async def get_user_esp32_data(user_name: str, db: Session = Depends(get_db)):
     # Obtener datos almacenados del usuario
     user_data = user_esp32_data_store.get(user_name, {})
     
+    # Determinar capacidad de posicionamiento
+    devices_count = len(user_data)
+    if devices_count >= 3:
+        positioning_capability = "Trilateración completa (precisión alta)"
+    elif devices_count == 2:
+        positioning_capability = "Bilateración (precisión media)"
+    elif devices_count == 1:
+        positioning_capability = "Aproximación simple (precisión baja)"
+    else:
+        positioning_capability = "Sin capacidad de posicionamiento"
+    
     return UserBeaconDataResponse(
         user_name=user_name,
         beacon_name=beacon.beacon_name,
         esp32_data=user_data,
         total_measurements=len(user_data),
-        can_calculate_position=len(user_data) >= 3
+        can_calculate_position=len(user_data) >= 1,  # Cambiado de 3 a 1
+        positioning_capability=positioning_capability
     )
 
 # ==================== ENDPOINTS PUNTOS DE INTERÉS ====================
@@ -344,7 +394,7 @@ async def get_punto_interes_by_id(punto_id: int, db: Session = Depends(get_db)):
 @app.post("/calculate/position/{user_name}", response_model=TrilaterationResponse)
 async def calculate_position_for_user(user_name: str, db: Session = Depends(get_db)):
     """
-    Calcular posición usando trilateración para un usuario específico
+    Calcular posición usando diferentes métodos dependiendo de dispositivos disponibles (modificado)
     """
     # Verificar que el usuario tiene un beacon asignado
     beacon = get_beacon_by_user_name(db, user_name)
@@ -357,10 +407,10 @@ async def calculate_position_for_user(user_name: str, db: Session = Depends(get_
     # Obtener datos del usuario
     user_data = user_esp32_data_store.get(user_name, {})
     
-    if len(user_data) < 3:
+    if len(user_data) < 1:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Se necesitan datos de al menos 3 dispositivos para {user_name}. Actualmente: {len(user_data)}"
+            detail=f"Se necesitan datos de al menos 1 dispositivo para {user_name}. Actualmente: {len(user_data)}"
         )
     
     # Convertir datos a formato DeviceInfo
@@ -374,7 +424,7 @@ async def calculate_position_for_user(user_name: str, db: Session = Depends(get_
         )
         devices.append(device_info)
     
-    # Validar datos para trilateración
+    # Validar datos para cálculo de posición
     validation = validate_trilateration_data(devices)
     if not validation["valid"]:
         raise HTTPException(
@@ -382,8 +432,8 @@ async def calculate_position_for_user(user_name: str, db: Session = Depends(get_
             detail=validation["message"]
         )
     
-    # Calcular posición
-    position = calculate_trilateration(devices)
+    # Calcular posición con fallback
+    position, method, precision = calculate_position_with_fallback(devices)
     if not position:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -393,14 +443,17 @@ async def calculate_position_for_user(user_name: str, db: Session = Depends(get_
     return TrilaterationResponse(
         calculated_position={"x": position[0], "y": position[1]},
         devices_used=devices,
+        positioning_method=method,
+        precision_level=precision,
+        devices_count=len(devices),
         success=True,
-        message=f"Posición calculada exitosamente para usuario {user_name} usando beacon {beacon.beacon_name}"
+        message=f"Posición calculada usando {method} con precisión {precision} para usuario {user_name} ({len(devices)} dispositivos)"
     )
 
 @app.post("/calculate/distances/{user_name}", response_model=DistancesResponse)
 async def calculate_distances_from_user_position(user_name: str, db: Session = Depends(get_db)):
     """
-    Calcular distancias desde la posición de un usuario específico a todos los puntos de interés
+    Calcular distancias desde la posición de un usuario específico (modificado)
     """
     # Verificar que el usuario tiene un beacon asignado
     beacon = get_beacon_by_user_name(db, user_name)
@@ -413,10 +466,10 @@ async def calculate_distances_from_user_position(user_name: str, db: Session = D
     # Obtener datos del usuario
     user_data = user_esp32_data_store.get(user_name, {})
     
-    if len(user_data) < 3:
+    if len(user_data) < 1:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"No se puede determinar la posición de {user_name}. Se necesitan datos de al menos 3 dispositivos ESP32"
+            detail=f"No se puede determinar la posición de {user_name}. Se necesitan datos de al menos 1 dispositivo ESP32"
         )
     
     # Calcular posición del usuario
@@ -430,7 +483,7 @@ async def calculate_distances_from_user_position(user_name: str, db: Session = D
         )
         devices.append(device_info)
     
-    user_position = calculate_trilateration(devices)
+    user_position, method, precision = calculate_position_with_fallback(devices)
     if not user_position:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -450,17 +503,27 @@ async def calculate_distances_from_user_position(user_name: str, db: Session = D
         user_position[0], user_position[1], puntos_interes
     )
     
+    # Crear información de posicionamiento
+    positioning_info = {
+        "method": method,
+        "precision_level": precision,
+        "devices_count": len(devices),
+        "devices_used": [device.esp32_id for device in devices],
+        "confidence": f"Posicionamiento con {precision} precisión usando {len(devices)} dispositivo{'s' if len(devices) > 1 else ''}"
+    }
+    
     return DistancesResponse(
         user_position={"x": user_position[0], "y": user_position[1]},
         points_with_distances=points_with_distances,
+        positioning_info=positioning_info,
         success=True,
-        message=f"Distancias calculadas para usuario {user_name} con {len(points_with_distances)} puntos de interés"
+        message=f"Distancias calculadas para usuario {user_name} usando {method} ({precision} precisión) con {len(points_with_distances)} puntos de interés"
     )
 
 @app.post("/suggest/routes/{user_name}", response_model=RoutesResponse)
 async def suggest_routes_from_current_position(user_name: str, max_suggestions: Optional[int] = 3, db: Session = Depends(get_db)):
     """
-    Sugerir rutas más cortas desde la posición actual de un usuario específico
+    Sugerir rutas más cortas desde la posición actual de un usuario específico (modificado)
     """
     # Verificar que el usuario tiene un beacon asignado
     beacon = get_beacon_by_user_name(db, user_name)
@@ -473,10 +536,10 @@ async def suggest_routes_from_current_position(user_name: str, max_suggestions: 
     # Obtener datos del usuario
     user_data = user_esp32_data_store.get(user_name, {})
     
-    if len(user_data) < 3:
+    if len(user_data) < 1:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"No se puede determinar la posición de {user_name}. Se necesitan datos de al menos 3 dispositivos ESP32"
+            detail=f"No se puede determinar la posición de {user_name}. Se necesitan datos de al menos 1 dispositivo ESP32"
         )
     
     # Calcular posición del usuario
@@ -490,7 +553,7 @@ async def suggest_routes_from_current_position(user_name: str, max_suggestions: 
         )
         devices.append(device_info)
     
-    user_position = calculate_trilateration(devices)
+    user_position, method, precision = calculate_position_with_fallback(devices)
     if not user_position:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -515,11 +578,21 @@ async def suggest_routes_from_current_position(user_name: str, max_suggestions: 
         points_with_distances, max_suggestions
     )
     
+    # Crear información de posicionamiento
+    positioning_info = {
+        "method": method,
+        "precision_level": precision,
+        "devices_count": len(devices),
+        "devices_used": [device.esp32_id for device in devices],
+        "confidence": f"Rutas basadas en posicionamiento con {precision} precisión"
+    }
+    
     return RoutesResponse(
         user_position={"x": user_position[0], "y": user_position[1]},
         suggested_routes=suggested_routes,
+        positioning_info=positioning_info,
         success=True,
-        message=f"Se generaron {len(suggested_routes)} sugerencias de rutas para usuario {user_name}"
+        message=f"Se generaron {len(suggested_routes)} sugerencias de rutas para usuario {user_name} usando {method} ({precision} precisión)"
     )
 
 @app.post("/routes/from-position", response_model=RoutesResponse)
@@ -574,7 +647,7 @@ async def get_routes_from_custom_position(request: RouteFromPositionRequest, db:
 @app.post("/calculate/nearest-points/{user_name}")
 async def get_nearest_points_for_user(user_name: str, max_points: Optional[int] = 5, db: Session = Depends(get_db)):
     """
-    Obtener los puntos de interés más cercanos a la posición de un usuario específico
+    Obtener los puntos de interés más cercanos a la posición de un usuario específico (modificado)
     """
     # Verificar que el usuario tiene un beacon asignado
     beacon = get_beacon_by_user_name(db, user_name)
@@ -587,10 +660,10 @@ async def get_nearest_points_for_user(user_name: str, max_points: Optional[int] 
     # Obtener datos del usuario
     user_data = user_esp32_data_store.get(user_name, {})
     
-    if len(user_data) < 3:
+    if len(user_data) < 1:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"No se puede determinar la posición de {user_name}. Se necesitan datos de al menos 3 dispositivos ESP32"
+            detail=f"No se puede determinar la posición de {user_name}. Se necesitan datos de al menos 1 dispositivo ESP32"
         )
     
     # Calcular posición del usuario
@@ -604,7 +677,7 @@ async def get_nearest_points_for_user(user_name: str, max_points: Optional[int] 
         )
         devices.append(device_info)
     
-    user_position = calculate_trilateration(devices)
+    user_position, method, precision = calculate_position_with_fallback(devices)
     if not user_position:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -634,8 +707,14 @@ async def get_nearest_points_for_user(user_name: str, max_points: Optional[int] 
         "user_position": {"x": user_position[0], "y": user_position[1]},
         "nearest_points": nearest_points,
         "total_points_found": len(nearest_points),
+        "positioning_info": {
+            "method": method,
+            "precision_level": precision,
+            "devices_count": len(devices),
+            "devices_used": [device.esp32_id for device in devices]
+        },
         "success": True,
-        "message": f"Se encontraron {len(nearest_points)} puntos cercanos para usuario {user_name}"
+        "message": f"Se encontraron {len(nearest_points)} puntos cercanos para usuario {user_name} usando {method} ({precision} precisión)"
     }
 
 # ==================== ENDPOINTS DE SISTEMA Y DEBUG ====================
@@ -643,7 +722,7 @@ async def get_nearest_points_for_user(user_name: str, max_points: Optional[int] 
 @app.get("/system/status")
 async def get_system_status(db: Session = Depends(get_db)):
     """
-    Obtener estado completo del sistema incluyendo beacons
+    Obtener estado completo del sistema con información de capacidades de posicionamiento mejoradas
     """
     # Contar dispositivos
     esp32_devices = get_all_esp32_devices(db)
@@ -653,6 +732,42 @@ async def get_system_status(db: Session = Depends(get_db)):
     # Estado de datos por usuario
     users_with_data = len(user_esp32_data_store)
     total_measurements = sum(len(data) for data in user_esp32_data_store.values())
+    
+    # Analizar capacidades de posicionamiento por usuario
+    positioning_analysis = {
+        "users_with_high_precision": 0,     # 3+ ESP32
+        "users_with_medium_precision": 0,   # 2 ESP32  
+        "users_with_low_precision": 0,      # 1 ESP32
+        "users_without_positioning": 0      # 0 ESP32
+    }
+    
+    user_details = {}
+    for user_name, esp32_data in user_esp32_data_store.items():
+        devices_count = len(esp32_data)
+        
+        if devices_count >= 3:
+            positioning_analysis["users_with_high_precision"] += 1
+            precision = "alta"
+            method = "trilateracion"
+        elif devices_count == 2:
+            positioning_analysis["users_with_medium_precision"] += 1
+            precision = "media"
+            method = "bilateracion"
+        elif devices_count == 1:
+            positioning_analysis["users_with_low_precision"] += 1
+            precision = "baja"  
+            method = "aproximacion_simple"
+        else:
+            positioning_analysis["users_without_positioning"] += 1
+            precision = "no_disponible"
+            method = "sin_datos"
+        
+        user_details[user_name] = {
+            "devices_count": devices_count,
+            "precision_level": precision,
+            "positioning_method": method,
+            "esp32_devices": list(esp32_data.keys())
+        }
     
     return {
         "system_status": "operational",
@@ -664,17 +779,32 @@ async def get_system_status(db: Session = Depends(get_db)):
         },
         "runtime_data": {
             "users_with_esp32_data": users_with_data,
-            "total_esp32_measurements": total_measurements,
-            "user_data_summary": {
-                user: len(data) for user, data in user_esp32_data_store.items()
-            }
+            "total_esp32_measurements": total_measurements
         },
+        "positioning_capabilities": {
+            "summary": positioning_analysis,
+            "user_details": user_details,
+            "total_users_with_positioning": (
+                positioning_analysis["users_with_high_precision"] + 
+                positioning_analysis["users_with_medium_precision"] + 
+                positioning_analysis["users_with_low_precision"]
+            )
+        },
+        "enhanced_features": [
+            "Funciona con 1, 2 o 3+ dispositivos ESP32",
+            "Trilateración completa (3+ ESP32) - Precisión alta",
+            "Bilateración (2 ESP32) - Precisión media",
+            "Aproximación simple (1 ESP32) - Precisión baja",
+            "Fallback automático según dispositivos disponibles",
+            "Información de precisión en todas las respuestas"
+        ],
         "capabilities": [
-            "Multi-user ESP32 Trilateration",
-            "Beacon Validation",
+            "Multi-user ESP32 Positioning with Fallback",
+            "Beacon Validation", 
             "User Isolation",
             "Points of Interest Management",
-            "Route Calculation per User"
+            "Adaptive Route Calculation per User",
+            "Precision-aware Positioning"
         ]
     }
 

@@ -1,8 +1,10 @@
+# app/models.py
+
 from sqlalchemy import Column, Integer, String, DECIMAL, Boolean, Text
 from app.database import Base
 
 class ESP32_UCSG(Base):
-    __tablename__ = "ESP32_UCSG"
+    __tablename__ = "esp32_ucsg"
     
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     esp32_id = Column(String(50), unique=True, nullable=False, index=True)

@@ -1,3 +1,5 @@
+# app/crud.py
+
 from sqlalchemy.orm import Session
 from app.models import ESP32_UCSG, PuntoInteres, Beacon
 from typing import List, Optional
