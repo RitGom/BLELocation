@@ -1,13 +1,15 @@
+# app/schema.py
 from pydantic import BaseModel
 from typing import Optional, List
 from decimal import Decimal
 
-# Esquemas existentes sin cambios
+# Esquema para recibir datos del ESP32
 class ESP32DataRequest(BaseModel):
     esp32_id: str
     rssi: int
     beacon_name: str
 
+# Esquema para respuesta de ESP32
 class ESP32Response(BaseModel):
     id: int
     esp32_id: str
@@ -17,29 +19,28 @@ class ESP32Response(BaseModel):
     class Config:
         from_attributes = True
 
+# Esquema para coordenadas calculadas
 class CoordinatesResponse(BaseModel):
     x: float
     y: float
     success: bool
     message: str
 
+# Esquema para información del dispositivo
 class DeviceInfo(BaseModel):
     esp32_id: str
     x: float
     y: float
     distance: float
 
-# Esquema modificado para trilateración con información de precisión
+# Esquema para respuesta de trilateración
 class TrilaterationResponse(BaseModel):
     calculated_position: dict
     devices_used: list[DeviceInfo]
-    positioning_method: str  # "trilateracion", "bilateracion", "aproximacion_simple", etc.
-    precision_level: str     # "alta", "media", "baja"
-    devices_count: int       # Número de dispositivos usados
     success: bool
     message: str
 
-# Esquemas de Puntos de Interés (sin cambios)
+#Esquemas de Puntos de Interes
 class PuntoInteresResponse(BaseModel):
     id: int
     nombre: str
@@ -56,11 +57,9 @@ class PuntoInteresWithDistance(BaseModel):
     coordenada_y: float
     distance: float
 
-# Esquemas de distancias modificados para incluir información de precisión
 class DistancesResponse(BaseModel):
     user_position: dict
     points_with_distances: List[PuntoInteresWithDistance]
-    positioning_info: dict   # Información sobre el método y precisión del posicionamiento
     success: bool
     message: str
 
@@ -79,11 +78,9 @@ class RouteSuggestion(BaseModel):
     estimated_time: str
     instructions: List[str]
 
-# Esquema de rutas modificado para incluir información de precisión
 class RoutesResponse(BaseModel):
     user_position: dict
     suggested_routes: List[RouteSuggestion]
-    positioning_info: dict   # Información sobre el método y precisión del posicionamiento
     success: bool
     message: str
 
@@ -111,19 +108,43 @@ class BeaconValidationResponse(BaseModel):
     user_name: str
     message: str
 
-# Esquema modificado para incluir información de precisión
 class UserBeaconDataResponse(BaseModel):
     user_name: str
     beacon_name: str
     esp32_data: dict
     total_measurements: int
     can_calculate_position: bool
-    positioning_capability: str  # Descripción de la capacidad de posicionamiento
 
-# Nuevo esquema para respuestas que incluyen información de posicionamiento
-class PositioningInfo(BaseModel):
-    method: str              # Método usado para calcular posición
-    precision_level: str     # Nivel de precisión
-    devices_count: int       # Número de dispositivos usados
-    devices_used: List[str]  # Lista de IDs de ESP32 usados
-    confidence: str          # Nivel de confianza del cálculo
+class PositioningQualityInfo(BaseModel):
+    quality: str  # "no_data", "no_signal", "basic", "good", "excellent"
+    description: str
+    esp32_count: int
+    valid_esp32_count: int
+
+class ApproximationResponse(BaseModel):
+    """Respuesta mejorada para sistema de aproximación RSSI"""
+    calculated_position: dict
+    positioning_method: str
+    reference_esp32: str
+    positioning_quality: PositioningQualityInfo
+    devices_used: list[DeviceInfo]
+    success: bool
+    message: str
+
+class UserPositionStatus(BaseModel):
+    """Estado de posicionamiento de un usuario"""
+    user_name: str
+    beacon_name: str
+    has_position_data: bool
+    positioning_quality: Optional[PositioningQualityInfo]
+    esp32_devices_count: int
+    last_update: Optional[str]
+    estimated_position: Optional[dict]
+
+class SystemAnalysisResponse(BaseModel):
+    """Análisis completo del sistema de aproximación"""
+    total_users: int
+    users_with_positioning: int
+    positioning_quality_distribution: dict
+    esp32_coverage_analysis: dict
+    recommendations: List[str]

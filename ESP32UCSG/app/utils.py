@@ -1,9 +1,11 @@
+# app/utils.py
+
 import math
 from typing import List, Tuple, Optional, Dict
 from app.schemas import DeviceInfo, PuntoInteresWithDistance, RouteSuggestion, RoutePoint
 
-# Funciones existentes sin cambios
-def rssi_to_distance(rssi: int, tx_power: int = -59, path_loss_exponent: float = 2.0) -> float:
+# Funciones existentes
+def rssi_to_distance(rssi: int, tx_power: int = -12, path_loss_exponent: float = 2.0) -> float:
     """
     Convertir RSSI a distancia usando la fórmula de pérdida de trayectoria
     """
@@ -17,149 +19,89 @@ def rssi_to_distance(rssi: int, tx_power: int = -59, path_loss_exponent: float =
         accuracy = (0.89976) * math.pow(ratio, 7.7095) + 0.111
         return accuracy
 
-def calculate_trilateration(devices: List[DeviceInfo]) -> Optional[Tuple[float, float]]:
+def calculate_position_by_strongest_rssi(devices: List[DeviceInfo]) -> Optional[Tuple[float, float]]:
     """
-    Calcular posición usando trilateración con al menos 3 puntos
+    Calcular posición aproximada usando el ESP32 con mejor RSSI (más fuerte)
+    y aplicando un offset basado en la distancia estimada
     """
-    if len(devices) < 3:
+    if not devices:
         return None
     
-    # Usar los primeros 3 dispositivos
-    p1, p2, p3 = devices[0], devices[1], devices[2]
+    # Encontrar el dispositivo con mejor RSSI (valor menos negativo)
+    # En RSSI, -30 es mejor que -60
+    strongest_device = max(devices, key=lambda d: -d.distance if d.distance > 0 else float('-inf'))
     
-    x1, y1, r1 = p1.x, p1.y, p1.distance
-    x2, y2, r2 = p2.x, p2.y, p2.distance
-    x3, y3, r3 = p3.x, p3.y, p3.distance
-    
-    try:
-        # Método de trilateración algebraica
-        A = 2 * (x2 - x1)
-        B = 2 * (y2 - y1)
-        C = r1**2 - r2**2 - x1**2 + x2**2 - y1**2 + y2**2
-        D = 2 * (x3 - x2)
-        E = 2 * (y3 - y2)
-        F = r2**2 - r3**2 - x2**2 + x3**2 - y2**2 + y3**2
-        
-        # Resolver el sistema de ecuaciones
-        denominator = A * E - B * D
-        if abs(denominator) < 1e-10:
-            return None
-        
-        x = (C * E - F * B) / denominator
-        y = (A * F - D * C) / denominator
-        
-        return (x, y)
-    
-    except (ZeroDivisionError, ValueError):
-        return None
-
-def calculate_approximate_position(devices: List[DeviceInfo]) -> Optional[Tuple[float, float]]:
-    """
-    Calcular posición aproximada con 1 o 2 dispositivos ESP32
-    """
-    if len(devices) == 0:
+    if strongest_device.distance <= 0:
         return None
     
-    if len(devices) == 1:
-        # Con un solo dispositivo, usar su posición como aproximación
-        # La precisión será baja pero permitirá al sistema funcionar
-        device = devices[0]
-        # Aproximar posición cerca del dispositivo con un offset basado en la distancia
-        offset_x = min(device.distance * 0.5, 2.0)  # Máximo 2 metros de offset
-        offset_y = min(device.distance * 0.5, 2.0)
-        return (device.x + offset_x, device.y + offset_y)
+    # Posición base del ESP32 más cercano
+    base_x = strongest_device.x
+    base_y = strongest_device.y
+    distance = strongest_device.distance
     
-    elif len(devices) == 2:
-        # Con dos dispositivos, calcular punto intermedio ponderado por distancia
-        d1, d2 = devices[0], devices[1]
-        
-        # Si las distancias son muy similares, usar punto medio
-        if abs(d1.distance - d2.distance) < 1.0:
-            x = (d1.x + d2.x) / 2
-            y = (d1.y + d2.y) / 2
-            return (x, y)
-        
-        # Ponderación inversa por distancia
-        w1 = 1 / (d1.distance + 0.1)  # Evitar división por cero
-        w2 = 1 / (d2.distance + 0.1)
-        
-        total_weight = w1 + w2
-        
-        x = (d1.x * w1 + d2.x * w2) / total_weight
-        y = (d1.y * w1 + d2.y * w2) / total_weight
-        
-        return (x, y)
+    # Aplicar offset basado en distancia estimada
+    # Para distancias cortas (< 2m), offset mínimo
+    # Para distancias mayores, offset proporcional
+    if distance < 2.0:
+        offset_radius = 0.5  # 50cm de offset mínimo
+    elif distance < 5.0:
+        offset_radius = distance * 0.3  # 30% de la distancia
+    else:
+        offset_radius = min(distance * 0.4, 3.0)  # Máximo 3m de offset
     
-    # Si hay 3 o más dispositivos, usar trilateración normal
-    return calculate_trilateration(devices)
+    # Aplicar offset en dirección que simule la posición del usuario
+    # Usamos un ángulo basado en las coordenadas para consistencia
+    angle = math.atan2(base_y, base_x) + math.pi/4  # Ángulo base + offset
+    
+    calculated_x = base_x + (offset_radius * math.cos(angle))
+    calculated_y = base_y + (offset_radius * math.sin(angle))
+    
+    return (calculated_x, calculated_y)
 
-def calculate_position_with_fallback(devices: List[DeviceInfo]) -> Tuple[Optional[Tuple[float, float]], str, str]:
+def validate_rssi_approximation_data(devices: List[DeviceInfo]) -> Dict[str, any]:
     """
-    Calcular posición con diferentes métodos dependiendo del número de dispositivos disponibles
-    
-    Returns:
-        - Tuple con (posicion, metodo_usado, precision_nivel)
+    Validar que los datos sean suficientes para aproximación por RSSI
     """
-    if len(devices) == 0:
-        return None, "sin_datos", "no_disponible"
-    
-    if len(devices) >= 3:
-        position = calculate_trilateration(devices)
-        if position:
-            return position, "trilateracion", "alta"
-        else:
-            # Si la trilateración falla, intentar con aproximación
-            position = calculate_approximate_position(devices)
-            return position, "aproximacion_multiple", "media"
-    
-    elif len(devices) == 2:
-        position = calculate_approximate_position(devices)
-        return position, "bilateracion", "media"
-    
-    elif len(devices) == 1:
-        position = calculate_approximate_position(devices)
-        return position, "aproximacion_simple", "baja"
-    
-    return None, "error", "no_disponible"
-
-def validate_trilateration_data(devices: List[DeviceInfo]) -> Dict[str, any]:
-    """
-    Validar que los datos sean suficientes para cálculo de posición (modificado para ser más flexible)
-    """
-    if len(devices) == 0:
+    if not devices:
         return {
             "valid": False,
-            "message": "No hay dispositivos disponibles"
+            "message": "No hay dispositivos disponibles para cálculo"
         }
     
-    # Verificar que las distancias sean válidas
-    for device in devices:
-        if device.distance <= 0:
-            return {
-                "valid": False,
-                "message": f"Distancia inválida para dispositivo {device.esp32_id}: {device.distance}"
-            }
+    # Verificar que al menos un dispositivo tenga distancia válida
+    valid_devices = [d for d in devices if d.distance > 0]
     
-    # Dar recomendaciones según el número de dispositivos
-    if len(devices) == 1:
+    if not valid_devices:
         return {
-            "valid": True,
-            "message": "Un dispositivo disponible - precisión baja pero funcional"
-        }
-    elif len(devices) == 2:
-        return {
-            "valid": True,
-            "message": "Dos dispositivos disponibles - precisión media"
-        }
-    elif len(devices) >= 3:
-        return {
-            "valid": True,
-            "message": "Tres o más dispositivos disponibles - precisión alta"
+            "valid": False,
+            "message": "Ningún dispositivo tiene una distancia válida"
         }
     
-    return {"valid": True, "message": "Datos válidos para cálculo de posición"}
+    return {
+        "valid": True, 
+        "message": f"Datos válidos para aproximación. {len(valid_devices)} dispositivos disponibles"
+    }
 
-# Resto de funciones sin cambios
+def get_positioning_quality_info(devices: List[DeviceInfo]) -> Dict[str, any]:
+    """
+    Obtener información sobre la calidad del posicionamiento
+    """
+    if not devices:
+        return {"quality": "no_data", "description": "Sin datos disponibles"}
+    
+    valid_devices = [d for d in devices if d.distance > 0]
+    num_valid = len(valid_devices)
+    
+    if num_valid == 0:
+        return {"quality": "no_signal", "description": "Sin señales válidas"}
+    elif num_valid == 1:
+        return {"quality": "basic", "description": "Posicionamiento básico con 1 punto de referencia"}
+    elif num_valid == 2:
+        return {"quality": "good", "description": "Posicionamiento bueno con 2 puntos de referencia"}
+    else:
+        return {"quality": "excellent", "description": "Posicionamiento excelente con 3+ puntos de referencia"}
+
+# Funciones existentes para cálculo de rutas y distancias
 def calculate_euclidean_distance(x1: float, y1: float, x2: float, y2: float) -> float:
     """
     Calcular distancia euclidiana entre dos puntos
@@ -216,7 +158,7 @@ def generate_walking_directions(user_x: float, user_y: float, dest_x: float, des
             directions.append(f"Camina {abs(dy):.1f} metros hacia el SUR")
     
     if not directions:
-        return "Ya estás en el destino"
+        return "Ya estás muy cerca del destino"
     
     return " y luego ".join(directions)
 
